@@ -1,35 +1,50 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
-import fs from "fs";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  getDoc, 
+  getDocs, 
+  query, 
+  where, 
+  updateDoc, 
+  deleteDoc,
+  limit
+} from 'firebase/firestore';
+import firebaseConfig from './firebase-applet-config.json' with { type: 'json' };
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const DB_FILE = path.join(__dirname, "db.json");
+// Initialize Firebase
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
-// Initialize DB if not exists
-if (!fs.existsSync(DB_FILE)) {
-  fs.writeFileSync(DB_FILE, JSON.stringify({
-    students: [],
-    payments: [],
-    admin: {
-      phone: "993190712",
-      password: "12345678"
-    }
-  }, null, 2));
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
 }
 
-function readDB() {
-  return JSON.parse(fs.readFileSync(DB_FILE, "utf-8"));
-}
-
-function writeDB(data: any) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
 }
 
 async function startServer() {
@@ -41,206 +56,264 @@ async function startServer() {
   // --- API ROUTES ---
 
   // Register
-  app.post("/api/register", (req, res) => {
+  app.post("/api/register", async (req, res) => {
     const { phone, password, name } = req.body;
-    const db = readDB();
-    if (!db.admins) db.admins = [];
-    
-    if (db.admins.find((a: any) => a.phone === phone)) {
-      return res.status(400).json({ success: false, message: "Ushbu telefon raqam allaqachon mavjud" });
-    }
+    const pathName = "admins";
+    try {
+      const q = query(collection(db, pathName), where("phone", "==", phone), limit(1));
+      const snapshot = await getDocs(q);
+      
+      if (!snapshot.empty) {
+        return res.status(400).json({ success: false, message: "Ushbu telefon raqam allaqachon mavjud" });
+      }
 
-    const newAdmin = { phone, password, name, id: Date.now().toString() };
-    db.admins.push(newAdmin);
-    db.admin = newAdmin; // Set as current main admin for simplicity
-    writeDB(db);
-    res.json({ success: true });
+      const id = Date.now().toString();
+      const newAdmin = { phone, password, name, id };
+      await setDoc(doc(db, pathName, id), newAdmin);
+      res.json({ success: true });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, pathName);
+    }
   });
 
   // Auth
-  app.post("/api/login", (req, res) => {
+  app.post("/api/login", async (req, res) => {
     const phone = req.body.phone?.toString().trim();
     const password = req.body.password?.toString().trim();
-    const db = readDB();
+    const pathName = "admins";
     
-    const admin = (db.admins || []).find((a: any) => a.phone === phone && a.password === password) || 
-                  (db.admin && db.admin.phone === phone && db.admin.password === password ? db.admin : null);
-    
-    if (admin) {
-      res.json({ success: true, token: "fake-jwt-token", admin });
-    } else {
-      res.status(401).json({ success: false, message: "Xato telefon yoki parol" });
+    try {
+      const q = query(collection(db, pathName), where("phone", "==", phone), where("password", "==", password), limit(1));
+      const snapshot = await getDocs(q);
+      
+      if (!snapshot.empty) {
+        const admin = snapshot.docs[0].data();
+        res.json({ success: true, token: "fake-jwt-token", admin });
+      } else {
+        res.status(401).json({ success: false, message: "Xato telefon yoki parol" });
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, pathName);
     }
   });
 
   // Students
-  app.get("/api/students", (req, res) => {
-    const adminId = req.headers["admin-id"];
-    const db = readDB();
-    
-    // Filter by adminId
-    const studentsByAdmin = db.students.filter((s: any) => s.adminId === adminId);
-    
-    const studentsWithDebt = studentsByAdmin.map((s: any) => {
-      const studentPayments = db.payments.filter((p: any) => p.studentId === s.id);
-      const totalPaid = studentPayments.reduce((sum: number, p: any) => sum + Number(p.amount), 0);
-      
-      // Calculate months from createdAt (avoiding birthDate for debt)
-      const startDate = new Date(s.createdAt || new Date().toISOString());
-      const now = new Date();
-      const monthsSinceJoin = Math.max(1, (now.getFullYear() - startDate.getFullYear()) * 12 + (now.getMonth() - startDate.getMonth()) + 1);
-      
-      const expectedTotal = Number(s.amount) * monthsSinceJoin;
-      return { ...s, debt: Math.max(0, expectedTotal - totalPaid), totalPaid };
-    });
-    res.json(studentsWithDebt);
+  app.get("/api/students", async (req, res) => {
+    const adminId = req.headers["admin-id"] as string;
+    const pathName = "students";
+    try {
+      const q = query(collection(db, pathName), where("adminId", "==", adminId));
+      const snapshot = await getDocs(q);
+      const students = snapshot.docs.map(doc => doc.data());
+
+      // We need payments for debt calculation
+      const pSnapshot = await getDocs(query(collection(db, "payments"), where("adminId", "==", adminId)));
+      const payments = pSnapshot.docs.map(doc => doc.data());
+
+      const studentsWithDebt = students.map((s: any) => {
+        const studentPayments = payments.filter((p: any) => p.studentId === s.id);
+        const totalPaid = studentPayments.reduce((sum: number, p: any) => sum + Number(p.amount), 0);
+        
+        const startDate = new Date(s.createdAt || new Date().toISOString());
+        const now = new Date();
+        const monthsSinceJoin = Math.max(1, (now.getFullYear() - startDate.getFullYear()) * 12 + (now.getMonth() - startDate.getMonth()) + 1);
+        
+        const expectedTotal = Number(s.amount) * monthsSinceJoin;
+        return { ...s, debt: Math.max(0, expectedTotal - totalPaid), totalPaid };
+      });
+      res.json(studentsWithDebt);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, pathName);
+    }
   });
 
-  app.post("/api/students", (req, res) => {
-    const adminId = req.headers["admin-id"];
+  app.post("/api/students", async (req, res) => {
+    const adminId = req.headers["admin-id"] as string;
     if (!adminId) return res.status(401).json({ message: "Admin ID missing" });
     
-    const db = readDB();
-    const newStudent = {
-      id: Date.now().toString(),
-      adminId,
-      ...req.body,
-      createdAt: new Date().toISOString()
-    };
-    db.students.push(newStudent);
-    writeDB(db);
-    res.json(newStudent);
-  });
-
-  app.put("/api/students/:id", (req, res) => {
-    const adminId = req.headers["admin-id"];
-    const db = readDB();
-    const index = db.students.findIndex((s: any) => String(s.id) === String(req.params.id) && String(s.adminId) === String(adminId));
-    if (index !== -1) {
-      db.students[index] = { ...db.students[index], ...req.body };
-      writeDB(db);
-      res.json(db.students[index]);
-    } else {
-      res.status(404).json({ message: "Student not found or access denied" });
+    const pathName = "students";
+    try {
+      const id = Date.now().toString();
+      const newStudent = {
+        id,
+        adminId,
+        ...req.body,
+        createdAt: new Date().toISOString()
+      };
+      await setDoc(doc(db, pathName, id), newStudent);
+      res.json(newStudent);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, pathName);
     }
   });
 
-  app.delete("/api/students/:id", (req, res) => {
-    const adminId = req.headers["admin-id"];
-    const db = readDB();
-    const originalLength = db.students.length;
-    db.students = db.students.filter((s: any) => !(String(s.id) === String(req.params.id) && String(s.adminId) === String(adminId)));
-    if (db.students.length < originalLength) {
-      writeDB(db);
-      res.json({ success: true });
-    } else {
-      console.log(`Delete failed for student ${req.params.id} by admin ${adminId}`);
-      res.status(404).json({ message: "Student not found or access denied" });
+  app.put("/api/students/:id", async (req, res) => {
+    const adminId = req.headers["admin-id"] as string;
+    const pathName = "students";
+    try {
+      const studentDoc = doc(db, pathName, req.params.id);
+      const snapshot = await getDoc(studentDoc);
+      
+      if (snapshot.exists() && snapshot.data().adminId === adminId) {
+        await updateDoc(studentDoc, req.body);
+        res.json({ ...snapshot.data(), ...req.body });
+      } else {
+        res.status(404).json({ message: "Student not found or access denied" });
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, pathName);
     }
   });
 
-  // Similarly for Payments, Attendance, and Expenses
-  app.get("/api/payments", (req, res) => {
-    const adminId = req.headers["admin-id"];
-    const db = readDB();
-    res.json(db.payments.filter((p: any) => p.adminId === adminId));
+  app.delete("/api/students/:id", async (req, res) => {
+    const adminId = req.headers["admin-id"] as string;
+    const pathName = "students";
+    try {
+      const studentDoc = doc(db, pathName, req.params.id);
+      const snapshot = await getDoc(studentDoc);
+      
+      if (snapshot.exists() && snapshot.data().adminId === adminId) {
+        await deleteDoc(studentDoc);
+        res.json({ success: true });
+      } else {
+        res.status(404).json({ message: "Student not found or access denied" });
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, pathName);
+    }
   });
 
-  app.post("/api/payments", (req, res) => {
-    const adminId = req.headers["admin-id"];
-    const db = readDB();
-    const newPayment = {
-      id: `CH-${Date.now()}`,
-      adminId,
-      ...req.body,
-      date: new Date().toISOString()
-    };
-    db.payments.push(newPayment);
-    writeDB(db);
-    res.json(newPayment);
+  app.get("/api/payments", async (req, res) => {
+    const adminId = req.headers["admin-id"] as string;
+    const pathName = "payments";
+    try {
+      const q = query(collection(db, pathName), where("adminId", "==", adminId));
+      const snapshot = await getDocs(q);
+      res.json(snapshot.docs.map(doc => doc.data()));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, pathName);
+    }
   });
 
-  // Expenses
-  app.get("/api/expenses", (req, res) => {
-    const adminId = req.headers["admin-id"];
-    const db = readDB();
-    if (!db.expenses) db.expenses = [];
-    res.json(db.expenses.filter((e: any) => e.adminId === adminId));
+  app.post("/api/payments", async (req, res) => {
+    const adminId = req.headers["admin-id"] as string;
+    const pathName = "payments";
+    try {
+      const id = `CH-${Date.now()}`;
+      const newPayment = {
+        id,
+        adminId,
+        ...req.body,
+        date: new Date().toISOString()
+      };
+      await setDoc(doc(db, pathName, id), newPayment);
+      res.json(newPayment);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, pathName);
+    }
   });
 
-  app.post("/api/expenses", (req, res) => {
-    const adminId = req.headers["admin-id"];
-    const db = readDB();
-    if (!db.expenses) db.expenses = [];
-    const newExpense = {
-      id: Date.now().toString(),
-      adminId,
-      ...req.body,
-      date: new Date().toISOString()
-    };
-    db.expenses.push(newExpense);
-    writeDB(db);
-    res.json(newExpense);
+  app.get("/api/expenses", async (req, res) => {
+    const adminId = req.headers["admin-id"] as string;
+    const pathName = "expenses";
+    try {
+      const q = query(collection(db, pathName), where("adminId", "==", adminId));
+      const snapshot = await getDocs(q);
+      res.json(snapshot.docs.map(doc => doc.data()));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, pathName);
+    }
   });
 
-  // Stats
-  app.get("/api/stats", (req, res) => {
-    const adminId = req.headers["admin-id"];
-    const db = readDB();
+  app.post("/api/expenses", async (req, res) => {
+    const adminId = req.headers["admin-id"] as string;
+    const pathName = "expenses";
+    try {
+      const id = Date.now().toString();
+      const newExpense = {
+        id,
+        adminId,
+        ...req.body,
+        date: new Date().toISOString()
+      };
+      await setDoc(doc(db, pathName, id), newExpense);
+      res.json(newExpense);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, pathName);
+    }
+  });
 
-    const myStudents = db.students.filter((s: any) => s.adminId === adminId);
-    const myPayments = db.payments.filter((p: any) => p.adminId === adminId);
-    const myExpenses = (db.expenses || []).filter((e: any) => e.adminId === adminId);
-
-    const totalStudents = myStudents.length;
-    const totalPayments = myPayments.reduce((sum: number, p: any) => sum + Number(p.amount), 0);
-    const totalExpenses = myExpenses.reduce((sum: number, e: any) => sum + Number(e.amount), 0);
+  app.get("/api/stats", async (req, res) => {
+    const adminId = req.headers["admin-id"] as string;
     
-    const currentMonth = new Date().getMonth();
-    const currentYear = new Date().getFullYear();
-    
-    const paidStudentIds = new Set(myPayments
-      .filter((p: any) => {
-        const d = new Date(p.date);
-        return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
-      })
-      .map((p: any) => p.studentId)
-    );
-    
-    const debtorsCount = myStudents.filter((s: any) => !paidStudentIds.has(s.id)).length;
+    try {
+      const sQ = query(collection(db, "students"), where("adminId", "==", adminId));
+      const pQ = query(collection(db, "payments"), where("adminId", "==", adminId));
+      const eQ = query(collection(db, "expenses"), where("adminId", "==", adminId));
 
-    const today = new Date();
-    const todayStr = `${(today.getMonth() + 1).toString().padStart(2, '0')}-${today.getDate().toString().padStart(2, '0')}`;
-    const birthdaysToday = myStudents.filter((s: any) => {
-      if (!s.birthDate) return false;
-      const bDay = new Date(s.birthDate);
-      const bDayStr = `${(bDay.getMonth() + 1).toString().padStart(2, '0')}-${bDay.getDate().toString().padStart(2, '0')}`;
-      return bDayStr === todayStr;
-    });
+      const [sSnap, pSnap, eSnap] = await Promise.all([getDocs(sQ), getDocs(pQ), getDocs(eQ)]);
+      
+      const myStudents = sSnap.docs.map(doc => doc.data());
+      const myPayments = pSnap.docs.map(doc => doc.data());
+      const myExpenses = eSnap.docs.map(doc => doc.data());
 
-    res.json({
-      totalStudents,
-      monthlyRevenue: totalPayments,
-      totalExpenses,
-      netProfit: totalPayments - totalExpenses,
-      debtorsCount,
-      activeGroups: Array.from(new Set(myStudents.map((s: any) => s.group))).length,
-      birthdaysToday: birthdaysToday.map((s: any) => s.name)
-    });
+      const totalStudents = myStudents.length;
+      const totalPayments = myPayments.reduce((sum: number, p: any) => sum + Number(p.amount), 0);
+      const totalExpenses = myExpenses.reduce((sum: number, e: any) => sum + Number(e.amount), 0);
+      
+      const currentMonth = new Date().getMonth();
+      const currentYear = new Date().getFullYear();
+      
+      const paidStudentIds = new Set(myPayments
+        .filter((p: any) => {
+          const d = new Date(p.date);
+          return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+        })
+        .map((p: any) => p.studentId)
+      );
+      
+      const debtorsCount = myStudents.filter((s: any) => !paidStudentIds.has(s.id)).length;
+
+      const today = new Date();
+      const todayStr = `${(today.getMonth() + 1).toString().padStart(2, '0')}-${today.getDate().toString().padStart(2, '0')}`;
+      const birthdaysToday = myStudents.filter((s: any) => {
+        if (!s.birthDate) return false;
+        const bDay = new Date(s.birthDate);
+        const bDayStr = `${(bDay.getMonth() + 1).toString().padStart(2, '0')}-${bDay.getDate().toString().padStart(2, '0')}`;
+        return bDayStr === todayStr;
+      });
+
+      res.json({
+        totalStudents,
+        monthlyRevenue: totalPayments,
+        totalExpenses,
+        netProfit: totalPayments - totalExpenses,
+        debtorsCount,
+        activeGroups: Array.from(new Set(myStudents.map((s: any) => s.group))).length,
+        birthdaysToday: birthdaysToday.map((s: any) => s.name)
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
   });
 
   // Telegram Notifications API
   app.post("/api/notify", async (req, res) => {
-    const adminId = req.headers["admin-id"];
     const { message, chatId, studentId } = req.body;
     const token = process.env.TELEGRAM_BOT_TOKEN;
     if (!token) return res.status(500).json({ message: "Bot token missing" });
 
     let targetChatId = chatId;
     if (studentId) {
-      const db = readDB();
-      const student = db.students.find((s: any) => s.id === studentId);
-      if (student?.parentChatId) targetChatId = student.parentChatId;
+      try {
+        const studentDoc = doc(db, "students", studentId);
+        const snapshot = await getDoc(studentDoc);
+        if (snapshot.exists() && snapshot.data().parentChatId) {
+          targetChatId = snapshot.data().parentChatId;
+        }
+      } catch (e) {
+        console.error("Error finding student for notification:", e);
+      }
     }
 
     if (!targetChatId && !process.env.ADMIN_ID) return res.status(400).json({ message: "No target chat ID" });
@@ -260,37 +333,42 @@ async function startServer() {
 
   // Broadcast
   app.post("/api/broadcast", async (req, res) => {
-    const adminId = req.headers["admin-id"];
+    const adminId = req.headers["admin-id"] as string;
     const { message } = req.body;
     const token = process.env.TELEGRAM_BOT_TOKEN;
     if (!token) return res.status(500).json({ message: "Bot token missing" });
 
-    const db = readDB();
-    const myStudents = db.students.filter((s: any) => s.adminId === adminId);
-    const activeParents = Array.from(new Set(myStudents.filter((s: any) => s.parentChatId).map((s: any) => s.parentChatId)));
-    
-    let successCount = 0;
-    let failCount = 0;
+    try {
+      const q = query(collection(db, "students"), where("adminId", "==", adminId));
+      const snapshot = await getDocs(q);
+      const myStudents = snapshot.docs.map(doc => doc.data());
+      const activeParents = Array.from(new Set(myStudents.filter((s: any) => s.parentChatId).map((s: any) => s.parentChatId)));
+      
+      let successCount = 0;
+      let failCount = 0;
 
-    for (const chatId of activeParents) {
-      try {
-        const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ 
-            chat_id: chatId, 
-            text: `📢 <b>MA'MURIYAT XABARI</b>\n\n${message}`, 
-            parse_mode: "HTML" 
-          })
-        });
-        if (response.ok) successCount++;
-        else failCount++;
-      } catch (e) {
-        failCount++;
+      for (const chatId of activeParents) {
+        try {
+          const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ 
+              chat_id: chatId, 
+              text: `📢 <b>MA'MURIYAT XABARI</b>\n\n${message}`, 
+              parse_mode: "HTML" 
+            })
+          });
+          if (response.ok) successCount++;
+          else failCount++;
+        } catch (e) {
+          failCount++;
+        }
       }
-    }
 
-    res.json({ success: true, successCount, failCount });
+      res.json({ success: true, successCount, failCount });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
   });
 
   // --- Telegram Bot Polling ---
@@ -315,7 +393,6 @@ async function startServer() {
           if (update.callback_query) {
             const chatId = update.callback_query.message.chat.id;
             const callbackData = update.callback_query.data;
-            const db = readDB();
 
             if (callbackData === "add_child") {
               userStates[chatId] = { action: "WAITING_NAME" };
@@ -329,7 +406,10 @@ async function startServer() {
                 })
               });
             } else if (callbackData === "check_debt") {
-              const students = db.students.filter((s: any) => s.parentChatId === chatId);
+              const q = query(collection(db, "students"), where("parentChatId", "==", chatId));
+              const sSnap = await getDocs(q);
+              const students = sSnap.docs.map(doc => doc.data());
+
               if (students.length === 0) {
                 await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
                   method: "POST",
@@ -338,7 +418,9 @@ async function startServer() {
                 });
               }
               for (const s of students) {
-                const studentPayments = db.payments.filter((p: any) => p.studentId === s.id);
+                const pSnap = await getDocs(query(collection(db, "payments"), where("studentId", "==", s.id)));
+                const studentPayments = pSnap.docs.map(doc => doc.data());
+                
                 const totalPaid = studentPayments.reduce((sum: number, p: any) => sum + Number(p.amount), 0);
                 const startDate = new Date(s.createdAt || new Date().toISOString());
                 const now = new Date();
@@ -357,28 +439,30 @@ async function startServer() {
               }
             } else if (callbackData.startsWith("sel_")) {
               const studentId = callbackData.replace("sel_", "");
-              const student = db.students.find((s: any) => s.id === studentId);
+              const sDoc = await getDoc(doc(db, "students", studentId));
               
-              if (student) {
-                // Check if parent is already authenticated (has other linked children)
-                const existingChild = db.students.find((s: any) => Number(s.parentChatId) === Number(chatId));
+              if (sDoc.exists()) {
+                const student = sDoc.data();
+                const parentSnap = await getDocs(query(collection(db, "students"), where("parentChatId", "==", chatId)));
+                const existingChild = parentSnap.empty ? null : parentSnap.docs[0].data();
                 
                 if (existingChild) {
-                  // Instant link for existing parents
-                  student.parentChatId = chatId;
-                  student.parentPhone = existingChild.parentPhone;
+                  await updateDoc(doc(db, "students", studentId), {
+                    parentChatId: chatId,
+                    parentPhone: existingChild.parentPhone
+                  });
                   
-                  const allChildren = db.students.filter((s: any) => 
-                    Number(s.parentChatId) === Number(chatId)
-                  );
+                  const allChildrenSnap = await getDocs(query(collection(db, "students"), where("parentChatId", "==", chatId)));
+                  const allChildren = allChildrenSnap.docs.map(doc => doc.data());
                   
                   if (allChildren.length >= 2) {
-                    allChildren.forEach((s: any) => s.amount = 200000);
+                    for (const child of allChildren) {
+                      await updateDoc(doc(db, "students", child.id), { amount: 200000 });
+                    }
                   } else {
-                    student.amount = 250000;
+                    await updateDoc(doc(db, "students", studentId), { amount: 250000 });
                   }
                   
-                  writeDB(db);
                   delete userStates[chatId];
                   
                   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -394,7 +478,6 @@ async function startServer() {
                     })
                   });
                 } else {
-                  // New parent: standard verification flow
                   userStates[chatId] = { ...userStates[chatId], action: "WAITING_CONTACT", studentId };
                   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
                     method: "POST",
@@ -422,10 +505,10 @@ async function startServer() {
           const chatId = msg.chat.id;
           const text = msg.text;
 
-          const db = readDB();
-
           if (text === "/start") {
-            const linkedStudents = db.students.filter((s: any) => Number(s.parentChatId) === Number(chatId));
+            const q = query(collection(db, "students"), where("parentChatId", "==", chatId));
+            const snapshot = await getDocs(q);
+            const linkedStudents = snapshot.docs.map(doc => doc.data());
             
             if (linkedStudents.length > 0) {
               const studentNames = linkedStudents.map((s: any) => `• <b>${s.name}</b>`).join("\n");
@@ -458,10 +541,15 @@ async function startServer() {
               });
             }
           } else if (text === "/qarz") {
-            const students = db.students.filter((s: any) => Number(s.parentChatId) === Number(chatId));
+            const q = query(collection(db, "students"), where("parentChatId", "==", chatId));
+            const snapshot = await getDocs(q);
+            const students = snapshot.docs.map(doc => doc.data());
+
             if (students.length > 0) {
               for (const s of students) {
-                const studentPayments = db.payments.filter((p: any) => p.studentId === s.id);
+                const pSnap = await getDocs(query(collection(db, "payments"), where("studentId", "==", s.id)));
+                const studentPayments = pSnap.docs.map(doc => doc.data());
+                
                 const totalPaid = studentPayments.reduce((sum: number, p: any) => sum + Number(p.amount), 0);
                 const startDate = new Date(s.createdAt || new Date().toISOString());
                 const now = new Date();
@@ -504,35 +592,34 @@ async function startServer() {
           } else if (text && userStates[chatId]?.action === "WAITING_CODE") {
             if (text.trim() === userStates[chatId].code) {
               const { studentId, phone } = userStates[chatId];
-              const student = db.students.find((s: any) => s.id === studentId);
               
-              if (student) {
-                student.parentChatId = chatId;
-                student.parentPhone = phone;
-                
-                const siblings = db.students.filter((s: any) => 
-                  (s.parentPhone === phone || Number(s.parentChatId) === Number(chatId))
-                );
-                
-                if (siblings.length >= 2) {
-                  siblings.forEach((s: any) => s.amount = 200000);
-                } else {
-                  student.amount = 250000;
+              await updateDoc(doc(db, "students", studentId!), {
+                parentChatId: chatId,
+                parentPhone: phone
+              });
+              
+              const siblingsSnap = await getDocs(query(collection(db, "students"), where("parentChatId", "==", chatId)));
+              const siblings = siblingsSnap.docs.map(doc => doc.data());
+              
+              if (siblings.length >= 2) {
+                for (const s of siblings) {
+                  await updateDoc(doc(db, "students", s.id), { amount: 200000 });
                 }
-
-                writeDB(db);
-                delete userStates[chatId];
-                
-                await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    chat_id: chatId,
-                    text: `✅ <b>Tasdiqlandi!</b>\n\nSiz <b>${student.name}</b> ning ota-onasi sifatida ulandingiz.\n\nEndi sizga har oy to'lov muddatlari va tadbirlar haqida xabar boradi.\n\n💰 Qarzdorlikni bilish: /qarz\n➕ Yana bola qo'shish: /start`,
-                    parse_mode: "HTML"
-                  })
-                });
+              } else {
+                await updateDoc(doc(db, "students", studentId!), { amount: 250000 });
               }
+
+              delete userStates[chatId];
+              
+              await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  chat_id: chatId,
+                  text: `✅ <b>Tasdiqlandi!</b>\n\nSiz ro'yxatdan o'tdingiz.\n\n💰 Qarzdorlik: /qarz\n➕ Yana bola qo'shish: /start`,
+                  parse_mode: "HTML"
+                })
+              });
             } else {
               await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
                 method: "POST",
@@ -541,10 +628,12 @@ async function startServer() {
               });
             }
           } else if (text && text.length >= 3 && !text.startsWith("/") && (!userStates[chatId] || userStates[chatId].action === "WAITING_NAME")) {
-            const query = text.toLowerCase();
-            const matches = db.students.filter((s: any) => 
-              s.name.toLowerCase().includes(query)
-            ).slice(0, 8);
+            const queryText = text.toLowerCase();
+            const sSnap = await getDocs(collection(db, "students"));
+            const matches = sSnap.docs
+              .map(doc => doc.data())
+              .filter((s: any) => s.name.toLowerCase().includes(queryText))
+              .slice(0, 8);
 
             if (matches.length > 0) {
               const inlineKeyboard = matches.map((s: any) => ([{
@@ -567,7 +656,7 @@ async function startServer() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                   chat_id: chatId,
-                  text: "❌ Kechirasiz, bu ismli o'quvchi topilmadi. Iltimos, ismni to'g'ri yozganingizga ishonch hosil qiling."
+                  text: "❌ Kechirasiz, bu ismli o'quvchi topilmadi."
                 })
               });
             }
