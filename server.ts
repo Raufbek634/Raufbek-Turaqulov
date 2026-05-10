@@ -295,16 +295,20 @@ async function startServer() {
 
   // --- Telegram Bot Polling ---
   let lastUpdateId = 0;
+  let isPolling = false;
   const userStates: Record<number, { action: string, studentId?: string, phone?: string, code?: string }> = {};
 
   async function pollTelegram() {
+    if (isPolling) return;
     const token = process.env.TELEGRAM_BOT_TOKEN;
     if (!token) return;
 
+    isPolling = true;
     try {
       const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=${lastUpdateId + 1}&timeout=30`);
       const data: any = await res.json();
-      if (data.ok && data.result.length > 0) {
+      
+      if (data.ok && data.result && data.result.length > 0) {
         for (const update of data.result) {
           lastUpdateId = update.update_id;
           
@@ -326,11 +330,19 @@ async function startServer() {
               });
             } else if (callbackData === "check_debt") {
               const students = db.students.filter((s: any) => s.parentChatId === chatId);
+              if (students.length === 0) {
+                await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ chat_id: chatId, text: "Sizga biriktirilgan o'quvchilar topilmadi." })
+                });
+              }
               for (const s of students) {
                 const studentPayments = db.payments.filter((p: any) => p.studentId === s.id);
                 const totalPaid = studentPayments.reduce((sum: number, p: any) => sum + Number(p.amount), 0);
-                const createdAt = new Date(s.createdAt || s.birthDate);
-                const months = Math.max(1, (new Date().getFullYear() - createdAt.getFullYear()) * 12 + (new Date().getMonth() - createdAt.getMonth()) + 1);
+                const startDate = new Date(s.createdAt || new Date().toISOString());
+                const now = new Date();
+                const months = Math.max(1, (now.getFullYear() - startDate.getFullYear()) * 12 + (now.getMonth() - startDate.getMonth()) + 1);
                 const debt = Math.max(0, (Number(s.amount) * months) - totalPaid);
 
                 await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -376,7 +388,7 @@ async function startServer() {
           const db = readDB();
 
           if (text === "/start") {
-            const linkedStudents = db.students.filter((s: any) => s.parentChatId === chatId);
+            const linkedStudents = db.students.filter((s: any) => Number(s.parentChatId) === Number(chatId));
             
             if (linkedStudents.length > 0) {
               const studentNames = linkedStudents.map((s: any) => `• <b>${s.name}</b>`).join("\n");
@@ -409,13 +421,14 @@ async function startServer() {
               });
             }
           } else if (text === "/qarz") {
-            const students = db.students.filter((s: any) => s.parentChatId === chatId);
+            const students = db.students.filter((s: any) => Number(s.parentChatId) === Number(chatId));
             if (students.length > 0) {
               for (const s of students) {
                 const studentPayments = db.payments.filter((p: any) => p.studentId === s.id);
                 const totalPaid = studentPayments.reduce((sum: number, p: any) => sum + Number(p.amount), 0);
-                const createdAt = new Date(s.createdAt || s.birthDate);
-                const months = Math.max(1, (new Date().getFullYear() - createdAt.getFullYear()) * 12 + (new Date().getMonth() - createdAt.getMonth()) + 1);
+                const startDate = new Date(s.createdAt || new Date().toISOString());
+                const now = new Date();
+                const months = Math.max(1, (now.getFullYear() - startDate.getFullYear()) * 12 + (now.getMonth() - startDate.getMonth()) + 1);
                 const debt = Math.max(0, (Number(s.amount) * months) - totalPaid);
 
                 await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -461,7 +474,7 @@ async function startServer() {
                 student.parentPhone = phone;
                 
                 const siblings = db.students.filter((s: any) => 
-                  (s.parentPhone === phone || s.parentChatId === chatId) && s.adminId === student.adminId
+                  (s.parentPhone === phone || Number(s.parentChatId) === Number(chatId)) && s.adminId === student.adminId
                 );
                 
                 if (siblings.length >= 2) {
@@ -491,7 +504,6 @@ async function startServer() {
               });
             }
           } else if (text && text.length >= 3 && !text.startsWith("/") && (!userStates[chatId] || userStates[chatId].action === "WAITING_NAME")) {
-            // Search for students
             const query = text.toLowerCase();
             const matches = db.students.filter((s: any) => 
               s.name.toLowerCase().includes(query)
@@ -526,9 +538,11 @@ async function startServer() {
         }
       }
     } catch (e) {
-      console.error("Bot error:", e);
+      console.error("Bot polling error:", e);
+    } finally {
+      isPolling = false;
+      setTimeout(pollTelegram, 2000);
     }
-    setTimeout(pollTelegram, 3000);
   }
 
   if (process.env.TELEGRAM_BOT_TOKEN) {

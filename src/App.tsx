@@ -564,6 +564,15 @@ const Students = () => {
                     className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
                   />
                 </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Bot Chat ID (Ixtiyoriy)</label>
+                  <input 
+                    type="number" value={currentStudent.parentChatId || ""}
+                    onChange={e => setCurrentStudent({...currentStudent, parentChatId: Number(e.target.value)})}
+                    placeholder="Bot orqali topiladi"
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                </div>
                 <div className="col-span-2 mt-4 flex gap-3">
                   <button 
                     type="button" onClick={() => setIsModalOpen(false)}
@@ -909,7 +918,7 @@ const Layout = ({ children }: { children: ReactNode }) => {
     { label: "O'quvchilar", icon: Users, path: "/students" },
     { label: "To'lovlar", icon: CreditCard, path: "/payments" },
     { label: "Xarajatlar", icon: TrendingUp, path: "/expenses" },
-    { label: "Xat yuborish", icon: Megaphone, path: "/broadcast" },
+    { label: "E'lon va Reklama", icon: Megaphone, path: "/broadcast" },
   ];
 
   const logout = () => {
@@ -1075,8 +1084,8 @@ const Broadcast = () => {
   return (
     <div className="p-8">
       <div className="mb-8">
-        <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Ommaviy Xabar yuborish</h1>
-        <p className="text-slate-500 text-sm">Botga ulangan barcha ota-onalarga reklama yoki e'lon yuborish</p>
+        <h1 className="text-2xl font-bold text-slate-900 tracking-tight">E'lon va Reklama yuborish</h1>
+        <p className="text-slate-500 text-sm">Botga ulangan barcha ota-onalarga reklama, e'lon yoki rasmli xabarlar yuborish</p>
       </div>
 
       <div className="max-w-2xl bg-white rounded-3xl border border-slate-100 p-8 shadow-sm">
