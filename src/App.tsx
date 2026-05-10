@@ -64,6 +64,14 @@ interface Payment {
 }
 
 // --- API Helpers ---
+const handleResponse = async (r: Response) => {
+  if (!r.ok) {
+    const errorData = await r.json().catch(() => ({}));
+    throw new Error(errorData.message || `Xatolik: ${r.status}`);
+  }
+  return r.json();
+};
+
 const getAdminId = () => {
   const adminStr = localStorage.getItem("admin");
   if (!adminStr) return null;
@@ -75,17 +83,17 @@ const getAdminId = () => {
 };
 
 const api = {
-  getStudents: () => fetch("/api/students", { headers: { "admin-id": getAdminId() || "" } }).then(r => r.json()),
-  addStudent: (data: any) => fetch("/api/students", { method: "POST", headers: { "Content-Type": "application/json", "admin-id": getAdminId() || "" }, body: JSON.stringify(data) }).then(r => r.json()),
-  updateStudent: (id: string, data: any) => fetch(`/api/students/${id}`, { method: "PUT", headers: { "Content-Type": "application/json", "admin-id": getAdminId() || "" }, body: JSON.stringify(data) }).then(r => r.json()),
-  deleteStudent: (id: string) => fetch(`/api/students/${id}`, { method: "DELETE", headers: { "admin-id": getAdminId() || "" } }).then(r => r.json()),
-  getPayments: () => fetch("/api/payments", { headers: { "admin-id": getAdminId() || "" } }).then(r => r.json()),
-  addPayment: (data: any) => fetch("/api/payments", { method: "POST", headers: { "Content-Type": "application/json", "admin-id": getAdminId() || "" }, body: JSON.stringify(data) }).then(r => r.json()),
-  getStats: () => fetch("/api/stats", { headers: { "admin-id": getAdminId() || "" } }).then(r => r.json()),
-  notify: (data: any) => fetch("/api/notify", { method: "POST", headers: { "Content-Type": "application/json", "admin-id": getAdminId() || "" }, body: JSON.stringify(data) }).then(r => r.json()),
-  broadcast: (data: any) => fetch("/api/broadcast", { method: "POST", headers: { "Content-Type": "application/json", "admin-id": getAdminId() || "" }, body: JSON.stringify(data) }).then(r => r.json()),
-  getExpenses: () => fetch("/api/expenses", { headers: { "admin-id": getAdminId() || "" } }).then(r => r.json()),
-  addExpense: (data: any) => fetch("/api/expenses", { method: "POST", headers: { "Content-Type": "application/json", "admin-id": getAdminId() || "" }, body: JSON.stringify(data) }).then(r => r.json()),
+  getStudents: () => fetch("/api/students", { headers: { "admin-id": getAdminId() || "" } }).then(handleResponse),
+  addStudent: (data: any) => fetch("/api/students", { method: "POST", headers: { "Content-Type": "application/json", "admin-id": getAdminId() || "" }, body: JSON.stringify(data) }).then(handleResponse),
+  updateStudent: (id: string, data: any) => fetch(`/api/students/${id}`, { method: "PUT", headers: { "Content-Type": "application/json", "admin-id": getAdminId() || "" }, body: JSON.stringify(data) }).then(handleResponse),
+  deleteStudent: (id: string) => fetch(`/api/students/${id}`, { method: "DELETE", headers: { "admin-id": getAdminId() || "" } }).then(handleResponse),
+  getPayments: () => fetch("/api/payments", { headers: { "admin-id": getAdminId() || "" } }).then(handleResponse),
+  addPayment: (data: any) => fetch("/api/payments", { method: "POST", headers: { "Content-Type": "application/json", "admin-id": getAdminId() || "" }, body: JSON.stringify(data) }).then(handleResponse),
+  getStats: () => fetch("/api/stats", { headers: { "admin-id": getAdminId() || "" } }).then(handleResponse),
+  notify: (data: any) => fetch("/api/notify", { method: "POST", headers: { "Content-Type": "application/json", "admin-id": getAdminId() || "" }, body: JSON.stringify(data) }).then(handleResponse),
+  broadcast: (data: any) => fetch("/api/broadcast", { method: "POST", headers: { "Content-Type": "application/json", "admin-id": getAdminId() || "" }, body: JSON.stringify(data) }).then(handleResponse),
+  getExpenses: () => fetch("/api/expenses", { headers: { "admin-id": getAdminId() || "" } }).then(handleResponse),
+  addExpense: (data: any) => fetch("/api/expenses", { method: "POST", headers: { "Content-Type": "application/json", "admin-id": getAdminId() || "" }, body: JSON.stringify(data) }).then(handleResponse),
 };
 
 // --- Components ---
@@ -120,10 +128,11 @@ const LoginPage = ({ onLogin }: { onLogin: () => void }) => {
           onLogin();
         }
       } else {
-        setError(data.message);
+        setError(data.message || "Login muvaffaqiyatsiz tugadi");
       }
     } catch (err) {
-      setError("Server bilan aloqa uzildi");
+      console.error("Login detail error:", err);
+      setError(`Server bilan aloqa uzildi: ${err instanceof Error ? err.message : 'Noma\'lum xato'}`);
     } finally {
       setLoading(false);
     }

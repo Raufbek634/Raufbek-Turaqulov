@@ -17,12 +17,25 @@ import {
   deleteDoc,
   limit
 } from 'firebase/firestore';
-import firebaseConfig from './firebase-applet-config.json' with { type: 'json' };
+import fs from "fs";
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Read Firebase config safely
+const configPath = path.join(__dirname, 'firebase-applet-config.json');
+let firebaseConfig: any = {};
+try {
+  if (fs.existsSync(configPath)) {
+    firebaseConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  } else {
+    console.error("Critical: firebase-applet-config.json not found");
+  }
+} catch (error) {
+  console.error("Critical: Could not read firebase-applet-config.json", error);
+}
 
 // Initialize Firebase
 const firebaseApp = initializeApp(firebaseConfig);
@@ -52,6 +65,11 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json());
+
+  // Health check for debugging
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok", firebase: !!firebaseConfig.projectId });
+  });
 
   // --- API ROUTES ---
 
@@ -690,6 +708,12 @@ async function startServer() {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
+
+  // Global error handler
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error("Global Server Error:", err);
+    res.status(500).json({ success: false, message: "Serverda ichki xatolik yuz berdi", detail: err.message });
+  });
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
