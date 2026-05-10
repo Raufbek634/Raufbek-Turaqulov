@@ -358,22 +358,59 @@ async function startServer() {
             } else if (callbackData.startsWith("sel_")) {
               const studentId = callbackData.replace("sel_", "");
               const student = db.students.find((s: any) => s.id === studentId);
+              
               if (student) {
-                userStates[chatId] = { ...userStates[chatId], action: "WAITING_CONTACT", studentId };
-                await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    chat_id: chatId,
-                    text: `Siz <b>${student.name}</b> ni tanladingiz. Tasdiqlash uchun pastdagi tugmani bosib telefon raqamingizni yuboring (kontakt ulash orqali):`,
-                    parse_mode: "HTML",
-                    reply_markup: {
-                      keyboard: [[{ text: "📱 Telefon raqamni yuborish", contact: true }]],
-                      resize_keyboard: true,
-                      one_time_keyboard: true
-                    }
-                  })
-                });
+                // Check if parent is already authenticated (has other linked children)
+                const existingChild = db.students.find((s: any) => Number(s.parentChatId) === Number(chatId));
+                
+                if (existingChild) {
+                  // Instant link for existing parents
+                  student.parentChatId = chatId;
+                  student.parentPhone = existingChild.parentPhone;
+                  
+                  const allChildren = db.students.filter((s: any) => 
+                    Number(s.parentChatId) === Number(chatId)
+                  );
+                  
+                  if (allChildren.length >= 2) {
+                    allChildren.forEach((s: any) => s.amount = 200000);
+                  } else {
+                    student.amount = 250000;
+                  }
+                  
+                  writeDB(db);
+                  delete userStates[chatId];
+                  
+                  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      chat_id: chatId,
+                      text: `✅ <b>Muvaffaqiyatli!</b>\n\n<b>${student.name}</b> ham ro'yxatingizga qo'shildi.\n\nSizda jami ${allChildren.length} ta farzand ulangan. Sibling chegirmasi avtomatik qo'llanildi.`,
+                      parse_mode: "HTML",
+                      reply_markup: {
+                        inline_keyboard: [[{ text: "💰 To'lovlarni ko'rish", callback_data: "check_debt" }]]
+                      }
+                    })
+                  });
+                } else {
+                  // New parent: standard verification flow
+                  userStates[chatId] = { ...userStates[chatId], action: "WAITING_CONTACT", studentId };
+                  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      chat_id: chatId,
+                      text: `Siz <b>${student.name}</b> ni tanladingiz. Tasdiqlash uchun pastdagi tugmani bosib telefon raqamingizni yuboring (kontakt ulash orqali):`,
+                      parse_mode: "HTML",
+                      reply_markup: {
+                        keyboard: [[{ text: "📱 Telefon raqamni yuborish", contact: true }]],
+                        resize_keyboard: true,
+                        one_time_keyboard: true
+                      }
+                    })
+                  });
+                }
               }
             }
             continue;
@@ -474,7 +511,7 @@ async function startServer() {
                 student.parentPhone = phone;
                 
                 const siblings = db.students.filter((s: any) => 
-                  (s.parentPhone === phone || Number(s.parentChatId) === Number(chatId)) && s.adminId === student.adminId
+                  (s.parentPhone === phone || Number(s.parentChatId) === Number(chatId))
                 );
                 
                 if (siblings.length >= 2) {
